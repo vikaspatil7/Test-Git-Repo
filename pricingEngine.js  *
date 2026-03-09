@@ -1,0 +1,290 @@
+/**
+ * pricingEngine.js
+ *
+ * Example business logic for order pricing.
+ * Pure JavaScript, no dependencies.
+ *
+ * You can later ask things like:
+ * - How does VIP discount work?
+ * - Why is free shipping not applied?
+ * - What happens for international orders?
+ * - In what order are discounts and taxes calculated?
+ */
+
+const TAX_RATES = {
+  IN: 0.18,
+  US: 0.07,
+  UK: 0.2,
+  DEFAULT: 0.1
+};
+
+const SHIPPING_RATES = {
+  domestic: 50,
+  international: 250,
+  expressSurcharge: 120
+};
+
+function roundToTwo(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function getTaxRate(countryCode) {
+  return TAX_RATES[countryCode] ?? TAX_RATES.DEFAULT;
+}
+
+function validateOrder(order) {
+  const errors = [];
+
+  if (!order) {
+    errors.push("Order is required.");
+    return errors;
+  }
+
+  if (!Array.isArray(order.items) || order.items.length === 0) {
+    errors.push("Order must include at least one item.");
+  }
+
+  if (!order.customer || !order.customer.type) {
+    errors.push("Customer type is required.");
+  }
+
+  if (!order.shippingAddress || !order.shippingAddress.country) {
+    errors.push("Shipping country is required.");
+  }
+
+  if (typeof order.couponCode !== "undefined" && typeof order.couponCode !== "string") {
+    errors.push("Coupon code must be a string.");
+  }
+
+  if (Array.isArray(order.items)) {
+    order.items.forEach((item, index) => {
+      if (!item.sku) {
+        errors.push(`Item ${index + 1}: sku is required.`);
+      }
+
+      if (typeof item.price !== "number" || item.price < 0) {
+        errors.push(`Item ${index + 1}: price must be a non-negative number.`);
+      }
+
+      if (!Number.isInteger(item.quantity) || item.quantity <= 0) {
+        errors.push(`Item ${index + 1}: quantity must be a positive integer.`);
+      }
+
+      if (item.category && !["general", "essential", "luxury", "digital"].includes(item.category)) {
+        errors.push(`Item ${index + 1}: invalid category.`);
+      }
+    });
+  }
+
+  return errors;
+}
+
+function calculateSubtotal(items) {
+  return items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+}
+
+function calculateItemLevelDiscount(items) {
+  let discount = 0;
+
+  for (const item of items) {
+    const lineTotal = item.price * item.quantity;
+
+    // Bulk discount: 10% off if quantity >= 10
+    if (item.quantity >= 10) {
+      discount += lineTotal * 0.10;
+    }
+
+    // Luxury items do not get bulk discount beyond a cap
+    if (item.category === "luxury" && item.quantity >= 10) {
+      discount -= lineTotal * 0.05;
+    }
+
+    // Digital items have no shipping but can receive promo discount
+    if (item.category === "digital" && item.quantity >= 3) {
+      discount += lineTotal * 0.05;
+    }
+  }
+
+  return roundToTwo(discount);
+}
+
+function calculateCustomerDiscount(subtotal, customerType) {
+  switch (customerType) {
+    case "VIP":
+      return roundToTwo(subtotal * 0.15);
+    case "PREMIUM":
+      return roundToTwo(subtotal * 0.1);
+    case "REGULAR":
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+function calculateCouponDiscount(subtotalAfterBaseDiscounts, couponCode, customerType) {
+  if (!couponCode) return 0;
+
+  const normalized = couponCode.trim().toUpperCase();
+
+  if (normalized === "SAVE10" && subtotalAfterBaseDiscounts >= 1000) {
+    return roundToTwo(subtotalAfterBaseDiscounts * 0.10);
+  }
+
+  if (normalized === "FLAT200" && subtotalAfterBaseDiscounts >= 2000) {
+    return 200;
+  }
+
+  if (normalized === "VIPBONUS" && customerType === "VIP") {
+    return 300;
+  }
+
+  if (normalized === "NEWUSER" && customerType === "REGULAR") {
+    return roundToTwo(subtotalAfterBaseDiscounts * 0.05);
+  }
+
+  return 0;
+}
+
+function calculateShipping(order, subtotalAfterDiscounts) {
+  const country = order.shippingAddress.country;
+  const isDomestic = country === "IN";
+  const hasOnlyDigitalItems = order.items.every(item => item.category === "digital");
+
+  if (hasOnlyDigitalItems) {
+    return 0;
+  }
+
+  if (subtotalAfterDiscounts >= 5000) {
+    return 0;
+  }
+
+  let shipping = isDomestic ? SHIPPING_RATES.domestic : SHIPPING_RATES.international;
+
+  if (order.shippingMethod === "EXPRESS") {
+    shipping += SHIPPING_RATES.expressSurcharge;
+  }
+
+  // Essentials get reduced domestic shipping
+  const hasEssentialItems = order.items.some(item => item.category === "essential");
+  if (isDomestic && hasEssentialItems) {
+    shipping -= 20;
+  }
+
+  return Math.max(0, shipping);
+}
+
+function calculateTax(order, taxableAmount) {
+  const country = order.shippingAddress.country;
+  const taxRate = getTaxRate(country);
+
+  // Export rule: no tax for international digital-only orders
+  const isInternational = country !== "IN";
+  const hasOnlyDigitalItems = order.items.every(item => item.category === "digital");
+
+  if (isInternational && hasOnlyDigitalItems) {
+    return 0;
+  }
+
+  return roundToTwo(taxableAmount * taxRate);
+}
+
+function generatePricingSummary(order) {
+  const validationErrors = validateOrder(order);
+
+  if (validationErrors.length > 0) {
+    return {
+      success: false,
+      errors: validationErrors
+    };
+  }
+
+  const subtotal = roundToTwo(calculateSubtotal(order.items));
+  const itemLevelDiscount = calculateItemLevelDiscount(order.items);
+  const customerDiscount = calculateCustomerDiscount(subtotal, order.customer.type);
+
+  const baseDiscountTotal = roundToTwo(itemLevelDiscount + customerDiscount);
+  const subtotalAfterBaseDiscounts = Math.max(0, subtotal - baseDiscountTotal);
+
+  const couponDiscount = calculateCouponDiscount(
+    subtotalAfterBaseDiscounts,
+    order.couponCode,
+    order.customer.type
+  );
+
+  const totalDiscount = roundToTwo(baseDiscountTotal + couponDiscount);
+  const discountedSubtotal = Math.max(0, subtotal - totalDiscount);
+
+  const shipping = calculateShipping(order, discountedSubtotal);
+  const taxableAmount = discountedSubtotal + shipping;
+  const tax = calculateTax(order, taxableAmount);
+  const grandTotal = roundToTwo(discountedSubtotal + shipping + tax);
+
+  let riskFlag = "LOW";
+
+  if (grandTotal > 10000) {
+    riskFlag = "HIGH";
+  } else if (order.shippingMethod === "EXPRESS" && order.customer.type === "REGULAR") {
+    riskFlag = "MEDIUM";
+  }
+
+  if (
+    order.shippingAddress.country !== "IN" &&
+    order.customer.type === "REGULAR" &&
+    grandTotal > 7000
+  ) {
+    riskFlag = "HIGH";
+  }
+
+  return {
+    success: true,
+    pricing: {
+      subtotal,
+      itemLevelDiscount,
+      customerDiscount,
+      couponDiscount,
+      totalDiscount,
+      discountedSubtotal,
+      shipping,
+      tax,
+      grandTotal
+    },
+    meta: {
+      customerType: order.customer.type,
+      country: order.shippingAddress.country,
+      shippingMethod: order.shippingMethod || "STANDARD",
+      riskFlag
+    }
+  };
+}
+
+// Example usage
+const sampleOrder = {
+  customer: {
+    id: "CUST-1001",
+    type: "VIP"
+  },
+  items: [
+    { sku: "NOTEBOOK-01", price: 200, quantity: 5, category: "general" },
+    { sku: "PEN-RED-10", price: 20, quantity: 12, category: "essential" },
+    { sku: "COURSE-JS", price: 500, quantity: 3, category: "digital" }
+  ],
+  couponCode: "SAVE10",
+  shippingMethod: "EXPRESS",
+  shippingAddress: {
+    country: "IN"
+  }
+};
+
+console.log(generatePricingSummary(sampleOrder));
+
+// Export for reuse in other files
+module.exports = {
+  generatePricingSummary,
+  validateOrder,
+  calculateSubtotal,
+  calculateItemLevelDiscount,
+  calculateCustomerDiscount,
+  calculateCouponDiscount,
+  calculateShipping,
+  calculateTax
+};
